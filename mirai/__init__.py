@@ -3,7 +3,7 @@ from mirai.misc import (
     ImageType
 )
 from mirai.face import QQFaces
-from mirai.exceptions import NetworkError
+from mirai.exceptions import NetworkError, Cancelled
 from mirai.depend import Depend
 
 import mirai.event.message.base
@@ -32,9 +32,7 @@ from mirai.event import (
     InternalEvent,
     ExternalEvent
 )
-from mirai.event.builtins import (
-    UnexpectedException
-)
+
 from mirai.event.external import (
     BotOnlineEvent,
     BotOfflineEventActive,
@@ -65,7 +63,7 @@ from mirai.event.external import (
     MemberMuteEvent,
     MemberUnmuteEvent
 )
-from mirai.event.external.enums import ExternalEvents
+
 
 from mirai.entities.friend import (
     Friend
@@ -82,3 +80,7 @@ import mirai.network
 import mirai.protocol
 
 from mirai.application import Mirai
+from mirai.event.builtins import (
+    UnexpectedException
+)
+from mirai.event.external.enums import ExternalEvents

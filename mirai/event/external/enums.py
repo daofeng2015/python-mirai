@@ -1,4 +1,5 @@
 from . import *
+from ..builtins import UnexpectedException
 from enum import Enum
 
 class ExternalEvents(Enum):
@@ -11,6 +12,9 @@ class ExternalEvents(Enum):
     BotMuteEvent = BotMuteEvent
     BotUnmuteEvent = BotUnmuteEvent
     BotJoinGroupEvent = BotJoinGroupEvent
+
+    GroupRecallEvent = GroupRecallEvent
+    FriendRecallEvent = FriendRecallEvent
 
     GroupNameChangeEvent = GroupNameChangeEvent
     GroupEntranceAnnouncementChangeEvent = GroupEntranceAnnouncementChangeEvent
@@ -31,3 +35,4 @@ class ExternalEvents(Enum):
     MemberMuteEvent = MemberMuteEvent
     MemberUnmuteEvent = MemberUnmuteEvent
 
+    UnexpectedException = UnexpectedException

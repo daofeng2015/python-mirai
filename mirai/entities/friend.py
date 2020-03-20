@@ -1,8 +1,6 @@
 from uuid import UUID
 from pydantic import BaseModel
 from typing import Optional
-from mirai.network import session
-from io import BytesIO
 
 class Friend(BaseModel):
     id: int
@@ -14,3 +12,5 @@ class Friend(BaseModel):
 
     def getAvatarUrl(self) -> str:
         return f'http://q4.qlogo.cn/g?b=qq&nk={self.id}&s=140'
+
+    

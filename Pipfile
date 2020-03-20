@@ -7,13 +7,13 @@ verify_ssl = true
 pylint = "*"
 devtools = "*"
 twine = "*"
-eliot-tree = "*"
 
 [packages]
 aiohttp = "*"
 pydantic = "*"
 pillow = "*"
 logbook = "*"
+parse = "*"
 
 [requires]
 python_version = "3.8"

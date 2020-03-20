@@ -11,6 +11,11 @@ from . import exceptions
 import traceback
 
 def assertOperatorSuccess(result, raise_exception=False, return_as_is=False):
+  if not result:
+    if raise_exception:
+      raise exceptions.InvaildSession("this method returned None, as sessionkey invaild...")
+    else:
+      return None
   if "code" in result:
     if not raise_exception:
       return result['code'] == 0
@@ -45,6 +50,8 @@ def assertOperatorSuccess(result, raise_exception=False, return_as_is=False):
 class ImageType(Enum):
   Friend = "friend"
   Group = "group"
+
+TRACEBACKED = os.urandom(32)
 
 ImageRegex = {
   "group": r"(?<=\{)([0-9A-Z]{8})\-([0-9A-Z]{4})-([0-9A-Z]{4})-([0-9A-Z]{4})-([0-9A-Z]{12})(?=\}\..*?)",
@@ -96,7 +103,7 @@ def randomRangedNumberString(length_range=(9,)):
   return random.choice(range(10**(length - 1), int("9"*(length))))
 
 def protocol_log(func):
-  async def warpper(*args, **kwargs):
+  async def wrapper(*args, **kwargs):
     try:
       result = await func(*args, **kwargs)
       Protocol.info(f"protocol method {func.__name__} was called")
@@ -104,7 +111,7 @@ def protocol_log(func):
     except Exception as e:
       Protocol.error(f"protocol method {func.__name__} raised a error: {e.__class__.__name__}")
       raise e
-  return warpper
+  return wrapper
 
 def secure_filename(filename):
   if isinstance(filename, str):
@@ -129,7 +136,7 @@ def secure_filename(filename):
   return filename
 
 def edge_case_handler(func):
-  async def warpper(self, *args, **kwargs):
+  async def wrapper(self, *args, **kwargs):
     client_connect_error_delay = 0
 
     while True:
@@ -147,11 +154,13 @@ def edge_case_handler(func):
       except (exceptions.InvaildSession, exceptions.ValidatedSession):
         Protocol.error("a unexpected session error, we will deal with it.")
         await self.enable_session()
-      except aiohttp.client_exceptions.ClientConnectorError:
+      except aiohttp.client_exceptions.ClientError:
         client_connect_error_delay += 5
         if client_connect_error_delay >= 40:
           Protocol.error("cannot retry any more, exiting....")
           exit(2)
+        else:
+          await asyncio.sleep(client_connect_error_delay)
         Protocol.error(f"cannot connect to the headless client, will retry after {client_connect_error_delay} seconds.")
         continue
       except exceptions.CallDevelopers:
@@ -159,14 +168,14 @@ def edge_case_handler(func):
         exit(-1)
       except:
         raise
-  warpper.__name__ = func.__name__
-  return warpper
+  wrapper.__name__ = func.__name__
+  return wrapper
 
 def if_error_print_arg(func):
-  def warpper(*args, **kwargs):
+  def wrapper(*args, **kwargs):
     try:
       return func(*args, **kwargs)
     except:
       print(args, kwargs)
       traceback.print_exc()
-  return warpper
+  return wrapper

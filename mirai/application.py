@@ -2,11 +2,11 @@ import asyncio
 import copy
 import inspect
 import traceback
-import typing as T
 from functools import partial
 from typing import (
     Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Union)
 from urllib import parse
+import contextlib
 
 import pydantic
 import aiohttp
@@ -15,31 +15,36 @@ from mirai.depend import Depend
 from mirai.entities.friend import Friend
 from mirai.entities.group import Group, Member
 from mirai.event import ExternalEvent, ExternalEventTypes, InternalEvent
-from mirai.event.builtins import UnexpectedException
-from mirai.event.external.enums import ExternalEvents
 from mirai.event.message import MessageChain, components
 from mirai.event.message.models import (FriendMessage, GroupMessage,
                                         MessageItemType, MessageTypes)
 from mirai.logger import Event as EventLogger
 from mirai.logger import Session as SessionLogger
-from mirai.misc import raiser
-from mirai.network import fetch, session
+from mirai.misc import raiser, TRACEBACKED
+from mirai.network import fetch
 from mirai.protocol import MiraiProtocol
+from mirai.exceptions import Cancelled
 
 class Mirai(MiraiProtocol):
   event: Dict[
     str, List[Callable[[Any], Awaitable]]
   ] = {}
   subroutines: List[Callable] = []
+  lifecycle: Dict[str, List[Callable]] = {
+    "start": [],
+    "end": [],
+    "around": []
+  }
   useWebsocket = False
+  listening_exceptions: List[Exception] = []
 
   def __init__(self, 
-    url: T.Optional[str] = None,
+    url: Optional[str] = None,
 
-    host: T.Optional[str] = None,
-    port: T.Optional[int] = None,
-    authKey: T.Optional[str] = None,
-    qq: T.Optional[int] = None,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    authKey: Optional[str] = None,
+    qq: Optional[int] = None,
 
     websocket: bool = False
   ):
@@ -58,7 +63,7 @@ class Mirai(MiraiProtocol):
           if urlinfo.path == "/ws":
             self.useWebsocket = True
           else:
-            self.useWebsocket = False
+            self.useWebsocket = websocket
 
           authKey = query_info["authKey"][0]
 
@@ -70,7 +75,7 @@ class Mirai(MiraiProtocol):
       else:
         raise ValueError("invaild url")
     else:
-      if all([host, port, authKey, qq]): 
+      if all([host, port, authKey, qq]):
         self.baseurl = f"http://{host}:{port}"
         self.auth_key = authKey
         self.qq = qq
@@ -99,19 +104,19 @@ class Mirai(MiraiProtocol):
     return self
 
   def receiver(self, event_name,
-      dependencies: T.List[Depend] = [],
-      use_middlewares: T.List[T.Callable] = []
+      dependencies: List[Depend] = None,
+      use_middlewares: List[Callable] = None
     ):
     def receiver_warpper(
-      func: T.Callable[[T.Union[FriendMessage, GroupMessage], "Session"], T.Awaitable[T.Any]]
+      func: Callable[[Union[FriendMessage, GroupMessage], "Session"], Awaitable[Any]]
     ):
       if not inspect.iscoroutinefunction(func):
         raise TypeError("event body must be a coroutine function.")
 
       protocol = {
         "func": func,
-        "dependencies": dependencies,
-        "middlewares": use_middlewares
+        "dependencies": dependencies or [],
+        "middlewares": use_middlewares or []
       }
       
       if event_name not in self.event:
@@ -122,6 +127,7 @@ class Mirai(MiraiProtocol):
     return receiver_warpper
 
   async def throw_exception_event(self, event_context, queue, exception):
+    from .event.builtins import UnexpectedException
     if event_context.name != "UnexpectedException":
       #print("error: by pre:", event_context.name)
       await queue.put(InternalEvent(
@@ -129,13 +135,12 @@ class Mirai(MiraiProtocol):
         body=UnexpectedException(
           error=exception,
           event=event_context,
-          session=self
+          application=self
         )
       ))
-      EventLogger.error(f"threw a exception by {event_context.name}, Exception: {exception}")
-      traceback.print_exc()
+      EventLogger.error(f"threw a exception by {event_context.name}, Exception: {exception.__class__.__name__}, but it has been catched.")
     else:
-      EventLogger.critical(f"threw a exception by {event_context.name}, Exception: {exception}, it's a exception handler.")
+      EventLogger.critical(f"threw a exception by {event_context.name}, Exception: {exception.__class__.__name__}, it's a exception handler.")
 
   async def argument_compiler(self, func, event_context):
     annotations_mapping = self.get_annotations_mapping()
@@ -151,14 +156,16 @@ class Mirai(MiraiProtocol):
     }
     return translated_mapping
 
-  def signature_getter(self, func):
+  @staticmethod
+  def signature_getter(func):
     "获取函数的默认值列表"
     return {k: v.default \
       for k, v in dict(inspect.signature(func).parameters).items() \
         if v.default != inspect._empty}
 
-  def signature_checker(self, func):
-    signature_mapping = self.signature_getter(func)
+  @staticmethod
+  def signature_checker(func):
+    signature_mapping = Mirai.signature_getter(func)
     for i in signature_mapping.values():
       if not isinstance(i, Depend):
         raise TypeError("you must use a Depend to patch the default value.")
@@ -184,15 +191,31 @@ class Mirai(MiraiProtocol):
           depend_func = depend.func.__call__
         else:
           raise TypeError("must be callable.")
+        
+        try:
+          result = await self.main_entrance(
+            {
+              "func": depend_func,
+              "middlewares": depend.middlewares,
+              "dependencies": []
+            },
+            event_context, queue
+          )
+          if result is TRACEBACKED:
+            return TRACEBACKED
+        except Cancelled:
+          return TRACEBACKED
+        except (NameError, TypeError) as e:
+          EventLogger.error(f"threw a exception by {event_context.name}, it's about Annotations Checker, please report to developer.")
+          traceback.print_exc()
+        except Exception as e:
+          if type(e) not in self.listening_exceptions:
+            EventLogger.error(f"threw a exception by {event_context.name} in a depend, and it's {e}, body has been cancelled.")
+            raise
+          else:
+            await self.throw_exception_event(event_context, queue, e)
+            return TRACEBACKED
 
-        await self.main_entrance(
-          {
-            "func": depend_func,
-            "middlewares": depend.middlewares,
-            "dependencies": []
-          },
-          event_context, queue
-        )
     else:
       if inspect.isclass(run_body):
         if hasattr(run_body, "__call__"):
@@ -202,16 +225,20 @@ class Mirai(MiraiProtocol):
       else:
         callable_target = run_body
 
+    depend_handler_result = await self.signature_checkout(
+      callable_target,
+      event_context,
+      queue
+    )
+    if depend_handler_result is TRACEBACKED:
+      return TRACEBACKED
+
     translated_mapping = {
       **(await self.argument_compiler(
         callable_target,
         event_context
       )),
-      **(await self.signature_checkout(
-        callable_target,
-        event_context,
-        queue
-      ))
+      **depend_handler_result
     }
 
     try:
@@ -263,16 +290,25 @@ class Mirai(MiraiProtocol):
     except (NameError, TypeError) as e:
       EventLogger.error(f"threw a exception by {event_context.name}, it's about Annotations Checker, please report to developer.")
       traceback.print_exc()
+    except Cancelled:
+      return TRACEBACKED
     except Exception as e:
-      EventLogger.error(f"threw a exception by {event_context.name}, and it's {e}")
-      await self.throw_exception_event(event_context, queue, e)
+      if type(e) not in self.listening_exceptions:
+        EventLogger.error(f"threw a exception by {event_context.name}, and it's {e}")
+        raise
+      else:
+        await self.throw_exception_event(event_context, queue, e)
+        return TRACEBACKED
 
   async def message_polling(self, exit_signal, queue, count=10):
     while not exit_signal():
       await asyncio.sleep(0.5)
 
-      result  = \
-        await super().fetchMessage(count)
+      try:
+        result  = \
+          await super().fetchMessage(count)
+      except pydantic.ValidationError:
+        continue
       last_length = len(result)
       latest_result = []
       while True:
@@ -293,7 +329,7 @@ class Mirai(MiraiProtocol):
         )
 
   async def ws_event_receiver(self, exit_signal, queue):
-    await self.checkWebsocket(force=True)
+    from mirai.event.external.enums import ExternalEvents
     async with aiohttp.ClientSession() as session:
       async with session.ws_connect(
         f"{self.baseurl}/all?sessionKey={self.session_key}"
@@ -335,7 +371,7 @@ class Mirai(MiraiProtocol):
     while not exit_signal_status():
       event_context: InternalEvent
       try:
-        event_context: T.NamedTuple[InternalEvent] = await asyncio.wait_for(queue.get(), 3)
+        event_context: NamedTuple[InternalEvent] = await asyncio.wait_for(queue.get(), 3)
       except asyncio.TimeoutError:
         if exit_signal_status():
           break
@@ -348,12 +384,14 @@ class Mirai(MiraiProtocol):
           if event_body:
             EventLogger.info(f"handling a event: {event_context.name}")
 
-            asyncio.create_task(self.main_entrance(
+            running_loop = asyncio.get_running_loop()
+            running_loop.create_task(self.main_entrance(
               event_body,
               event_context, queue
             ))
   
   def getRestraintMapping(self):
+    from mirai.event.external.enums import ExternalEvents
     def warpper(name, event_context):
       return name == event_context.name
     return {
@@ -375,7 +413,7 @@ class Mirai(MiraiProtocol):
     }
 
   def checkEventBodyAnnotations(self):
-    event_bodys: T.Dict[T.Callable, T.List[str]] = {}
+    event_bodys: Dict[Callable, List[str]] = {}
     for event_name in self.event:
       event_body_list = self.event[event_name]
       for i in event_body_list:
@@ -404,8 +442,8 @@ class Mirai(MiraiProtocol):
             except ValueError:
               raise
 
-  def getFuncRegisteredEvents(self, callable_target: T.Callable):
-    event_bodys: T.Dict[T.Callable, T.List[str]] = {}
+  def getFuncRegisteredEvents(self, callable_target: Callable):
+    event_bodys: Dict[Callable, List[str]] = {}
     for event_name in self.event:
       event_body_list = sum([list(i.values()) for i in self.event[event_name]], [])
       for i in event_body_list:
@@ -415,7 +453,7 @@ class Mirai(MiraiProtocol):
           event_bodys[i['func']].append(event_name)
     return event_bodys.get(callable_target)
 
-  def checkFuncAnnotations(self, callable_target: T.Callable):
+  def checkFuncAnnotations(self, callable_target: Callable):
     restraint_mapping = self.getRestraintMapping()
     whileList = self.signature_getter(callable_target)
     registered_events = self.getFuncRegisteredEvents(callable_target)
@@ -454,8 +492,10 @@ class Mirai(MiraiProtocol):
             self.checkDependencies(depend)
 
   def exception_handler(self, exception_class=None):
+    from .event.builtins import UnexpectedException
+    from mirai.event.external.enums import ExternalEvents
     def receiver_warpper(
-      func: T.Callable[[T.Union[FriendMessage, GroupMessage], "Session"], T.Awaitable[T.Any]]
+      func: Callable[[Union[FriendMessage, GroupMessage], "Session"], Awaitable[Any]]
     ):
       event_name = "UnexpectedException"
 
@@ -466,7 +506,7 @@ class Mirai(MiraiProtocol):
         if type(context.error) == exception_class:
           return await func(context, *args, **kwargs)
 
-      func_warpper_inout.__annotations__ = func.__annotations__
+      func_warpper_inout.__annotations__.update(func.__annotations__)
 
       protocol = {
         "func": func_warpper_inout,
@@ -478,10 +518,15 @@ class Mirai(MiraiProtocol):
         self.event[event_name] = [protocol]
       else:
         self.event[event_name].append(protocol)
+
+      if exception_class:
+        if exception_class not in self.listening_exceptions:
+          self.listening_exceptions.append(exception_class)
       return func
     return receiver_warpper
 
   def gen_event_anno(self):
+    from mirai.event.external.enums import ExternalEvents
     result = {}
     for event_name, event_class in ExternalEvents.__members__.items():
       def warpper(name, event_context):
@@ -523,6 +568,8 @@ class Mirai(MiraiProtocol):
     }
 
   def getEventCurrentName(self, event_value):
+    from .event.builtins import UnexpectedException
+    from mirai.event.external.enums import ExternalEvents
     if inspect.isclass(event_value) and issubclass(event_value, ExternalEvent): # subclass
       return event_value.__name__
     elif isinstance(event_value, ( # normal class
@@ -549,6 +596,7 @@ class Mirai(MiraiProtocol):
     return [self.getEventCurrentName(i) for i in self.event.keys()]
 
   def subroutine(self, func: Callable[["Mirai"], Any]):
+    from .event.builtins import UnexpectedException
     async def warpper(app: "Mirai"):
       try:
         return await func(app)
@@ -558,21 +606,28 @@ class Mirai(MiraiProtocol):
           body=UnexpectedException(
             error=e,
             event=None,
-            session=self
+            application=self
           )
         ))
     self.subroutines.append(warpper)
     return func
 
   async def checkWebsocket(self, force=False):
-    if self.useWebsocket:
-      if not (await self.getConfig())["enableWebsocket"]:
-        if not force:
-          raise ValueError("websocket is disabled.")
-        await self.setConfig(enableWebsocket=True)
-      return True
+    return (await self.getConfig())["enableWebsocket"]
+
+  @staticmethod
+  async def run_func(func, *args, **kwargs):
+    if inspect.iscoroutinefunction(func):
+      await func(*args, **kwargs)
     else:
-      return False
+      func(*args, **kwargs)
+
+  def onStage(self, stage_name):
+    def warpper(func):
+      self.lifecycle.setdefault(stage_name, [])
+      self.lifecycle[stage_name].append(func)
+      return func
+    return warpper
 
   def run(self, loop=None, no_polling=False, no_forever=False):
     self.checkEventBodyAnnotations()
@@ -583,17 +638,28 @@ class Mirai(MiraiProtocol):
     exit_signal = False
     loop.run_until_complete(self.enable_session())
     if not no_polling:
-      if not self.useWebsocket:
-        SessionLogger.warning("http's fetchMessage is disabled in mirai-api-http 1.2.1(it's a bug :P).")
-        SessionLogger.warning("so, you can use WebSocket.")
-        SessionLogger.warning("if it throw a unexpected error, you should call the httpapi's author.")
-        loop.create_task(self.message_polling(lambda: exit_signal, queue))
+      # check ws status
+      if self.useWebsocket:
+        SessionLogger.info("event receive method: websocket")
       else:
-        SessionLogger.warning("you are using WebSocket, it's a experimental method.")
-        SessionLogger.warning("but, websocket is remember way to fetch message and event,")
-        SessionLogger.warning("and http's fetchMessage is disabled in mirai-api-http 1.2.1(it's a bug :P).")
-        SessionLogger.warning("if it throw a unexpected error, you can call the httpapi's author.")
-        loop.create_task(self.ws_event_receiver(lambda: exit_signal, queue))
+        SessionLogger.info("event receive method: http polling")
+
+      result = loop.run_until_complete(self.checkWebsocket())
+      if not result: # we can use http, not ws.
+        # should use http, but we can change it.
+        if self.useWebsocket:
+          SessionLogger.warning("catched wrong config: enableWebsocket=false, we will modify it on launch.")
+          loop.run_until_complete(self.setConfig(enableWebsocket=True))
+          loop.create_task(self.ws_event_receiver(lambda: exit_signal, queue))
+        else:
+          loop.create_task(self.message_polling(lambda: exit_signal, queue))
+      else: # we can use websocket, it's fine
+        if self.useWebsocket:
+          loop.create_task(self.ws_event_receiver(lambda: exit_signal, queue))
+        else:
+          SessionLogger.warning("catched wrong config: enableWebsocket=true, we will modify it on launch.")
+          loop.run_until_complete(self.setConfig(enableWebsocket=False))
+          loop.create_task(self.message_polling(lambda: exit_signal, queue))
       loop.create_task(self.event_runner(lambda: exit_signal, queue))
     
     if not no_forever:
@@ -601,9 +667,22 @@ class Mirai(MiraiProtocol):
         loop.create_task(i(self))
 
     try:
+      for start_callable in self.lifecycle['start']:
+        loop.run_until_complete(self.run_func(start_callable, self))
+
+      for around_callable in self.lifecycle['around']:
+        loop.run_until_complete(self.run_func(around_callable, self))
+
       loop.run_forever()
     except KeyboardInterrupt:
       SessionLogger.info("catched Ctrl-C, exiting..")
+    except Exception as e:
+      traceback.print_exc()
     finally:
+      for around_callable in self.lifecycle['around']:
+        loop.run_until_complete(self.run_func(around_callable, self))
+
+      for end_callable in self.lifecycle['end']:
+        loop.run_until_complete(self.run_func(end_callable, self))
+
       loop.run_until_complete(self.release())
-      loop.run_until_complete(session.close())

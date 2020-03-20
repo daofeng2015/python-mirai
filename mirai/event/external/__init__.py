@@ -4,6 +4,7 @@ from mirai.event.enums import ExternalEventTypes as EventType
 from mirai.entities.group import Permission, Group, Member
 from mirai.entities.friend import Friend
 import typing as T
+from datetime import datetime
 
 class BotOnlineEvent(ExternalEvent):
     type: EventType = EventType.BotOnlineEvent
@@ -28,7 +29,7 @@ class BotReloginEvent(ExternalEvent):
 class BotGroupPermissionChangeEvent(ExternalEvent):
     type: EventType = EventType.BotGroupPermissionChangeEvent
     origin: Permission
-    new: Permission
+    current: Permission
     group: Group
 
 class BotMuteEvent(ExternalEvent):
@@ -44,45 +45,60 @@ class BotJoinGroupEvent(ExternalEvent):
     type: EventType = EventType.BotJoinGroupEvent
     group: Group
 
+class GroupRecallEvent(ExternalEvent):
+    type: EventType = EventType.GroupRecallEvent
+    authorId: int
+    messageId: int
+    time: datetime
+    group: Group
+    operator: Member
+
+class FriendRecallEvent(ExternalEvent):
+    type: EventType = EventType.FriendRecallEvent
+    authorId: int
+    messageId: int
+    time: int
+    operator: int
+
 class GroupNameChangeEvent(ExternalEvent):
     type: EventType = EventType.GroupNameChangeEvent
     origin: str
-    new: str
+    current: str
     group: Group
     isByBot: bool
 
 class GroupEntranceAnnouncementChangeEvent(ExternalEvent):
     type: EventType = EventType.GroupEntranceAnnouncementChangeEvent
     origin: str
-    new: str
+    current: str
     group: Group
     operator: T.Optional[Member]
 
 class GroupMuteAllEvent(ExternalEvent):
     type: EventType = EventType.GroupMuteAllEvent
     origin: bool
-    new: bool
+    current: bool
     group: Group
     operator: T.Optional[Member]
 
 class GroupAllowAnonymousChatEvent(ExternalEvent):
     type: EventType = EventType.GroupAllowAnonymousChatEvent
     origin: bool
-    new: bool
+    current: bool
     group: Group
     operator: T.Optional[Member]
 
 class GroupAllowConfessTalkEvent(ExternalEvent):
     type: EventType = EventType.GroupAllowAnonymousChatEvent
     origin: bool
-    new: bool
+    current: bool
     group: Group
     isByBot: bool
 
 class GroupAllowMemberInviteEvent(ExternalEvent):
     type: EventType = EventType.GroupAllowMemberInviteEvent
     origin: bool
-    new: bool
+    current: bool
     group: Group
     operator: T.Optional[Member]
 
@@ -102,20 +118,20 @@ class MemberLeaveEventQuit(ExternalEvent):
 class MemberCardChangeEvent(ExternalEvent):
     type: EventType = EventType.MemberCardChangeEvent
     origin: str
-    new: str
+    current: str
     member: Member
     operator: T.Optional[Member]
 
 class MemberSpecialTitleChangeEvent(ExternalEvent):
     type: EventType = EventType.MemberSpecialTitleChangeEvent
     origin: str
-    new: str
+    current: str
     member: Member
 
 class MemberPermissionChangeEvent(ExternalEvent):
     type: EventType = EventType.MemberPermissionChangeEvent
     origin: str
-    new: str
+    current: str
     member: Member
 
 class MemberMuteEvent(ExternalEvent):

@@ -8,7 +8,6 @@ import json
 from mirai.event.message.models import FriendMessage, GroupMessage, BotMessage, MessageTypes
 
 from mirai.event import ExternalEvent
-from mirai.event.external.enums import ExternalEvents
 from mirai.entities.friend import Friend
 from mirai.entities.group import Group, GroupSetting, Member, MemberChangeableSetting
 from mirai.event.message.chain import MessageChain
@@ -18,6 +17,7 @@ from mirai.event.message.base import BaseMessageComponent
 from mirai.event.message import components
 from mirai.misc import protocol_log, edge_case_handler
 from mirai.image import InternalImage
+from mirai.logger import Protocol as ProtocolLogger
 import threading
 
 class MiraiProtocol:
@@ -87,7 +87,7 @@ class MiraiProtocol:
         message: T.Union[
             MessageChain,
             BaseMessageComponent,
-            T.List[BaseMessageComponent],
+            T.List[T.Union[BaseMessageComponent, InternalImage]],
             str
         ]
     ) -> BotMessage:
@@ -106,7 +106,7 @@ class MiraiProtocol:
         message: T.Union[
             MessageChain,
             BaseMessageComponent,
-            T.List[BaseMessageComponent],
+            T.List[T.Union[BaseMessageComponent, InternalImage]],
             str
         ],
         quoteSource: T.Union[int, components.Source]=None
@@ -168,14 +168,8 @@ class MiraiProtocol:
 
     @protocol_log
     @edge_case_handler
-    async def uploadImage(self, type: T.Union[str, ImageType], imagePath: T.Union[Path, str]):
-        if isinstance(imagePath, str):
-            imagePath = Path(imagePath)
-
-        if not imagePath.exists():
-            raise FileNotFoundError("invaild image path.")
-
-        post_result = json.loads(await fetch.upload(f"{self.baseurl}/uploadImage", imagePath, {
+    async def uploadImage(self, type: T.Union[str, ImageType], image: InternalImage):
+        post_result = json.loads(await fetch.upload(f"{self.baseurl}/uploadImage", image.render(), {
             "sessionKey": self.session_key,
             "type": type if isinstance(type, str) else type.value
         }))
@@ -183,6 +177,7 @@ class MiraiProtocol:
 
     @edge_case_handler
     async def fetchMessage(self, count: int) -> T.List[T.Union[FriendMessage, GroupMessage, ExternalEvent]]:
+        from mirai.event.external.enums import ExternalEvents
         result = assertOperatorSuccess(
             await fetch.http_get(f"{self.baseurl}/fetchMessage", {
                 "sessionKey": self.session_key,
@@ -190,20 +185,24 @@ class MiraiProtocol:
             }
         ), raise_exception=True, return_as_is=True)
         # 因为重新生成一个开销太大, 所以就直接在原数据内进行遍历替换
-        for index in range(len(result)):
-            # 判断当前项是否为 Message
-            if result[index]['type'] in MessageTypes:
-                # 使用 custom_parse 方法处理消息链
-                if 'messageChain' in result[index]: 
-                    result[index]['messageChain'] = MessageChain.parse_obj(result[index]['messageChain'])
+        try:
+            for index in range(len(result)):
+                # 判断当前项是否为 Message
+                if result[index]['type'] in MessageTypes:
+                    if 'messageChain' in result[index]: 
+                        result[index]['messageChain'] = MessageChain.parse_obj(result[index]['messageChain'])
 
-                result[index] = \
-                    MessageTypes[result[index]['type']].parse_obj(result[index])
-    
-            elif hasattr(ExternalEvents, result[index]['type']):
-                # 判断当前项为 Event
-                result[index] = \
-                    ExternalEvents[result[index]['type']].value.parse_obj(result[index])
+                    result[index] = \
+                        MessageTypes[result[index]['type']].parse_obj(result[index])
+
+                elif hasattr(ExternalEvents, result[index]['type']):
+                    # 判断当前项为 Event
+                    result[index] = \
+                        ExternalEvents[result[index]['type']].value.parse_obj(result[index])
+        except pydantic.ValidationError:
+            ProtocolLogger.error(f"parse failed: {result}")
+            traceback.print_exc()
+            raise
         return result
 
     @protocol_log
@@ -362,7 +361,7 @@ class MiraiProtocol:
         message: T.Union[
             MessageChain,
             BaseMessageComponent,
-            T.List[BaseMessageComponent],
+            T.List[T.Union[BaseMessageComponent, InternalImage]],
             str
         ]):
         if isinstance(message, MessageChain):
@@ -372,13 +371,18 @@ class MiraiProtocol:
         elif isinstance(message, (tuple, list)):
             result = []
             for i in message:
-                if type(i) != InternalImage:
-                    result.append(json.loads(i.json()))
-                else:
+                if isinstance(i, InternalImage):
                     result.append({
                         "type": "Image",
                         "imageId": (await self.handleInternalImageAsGroup(i)).asGroupImage()
                     })
+                elif isinstance(i, components.Image):
+                    result.append({
+                        "type": "Image",
+                        "imageId": i.asGroupImage()
+                    })
+                else:
+                    result.append(json.loads(i.json()))
             return result
         elif isinstance(message, str):
             return [json.loads(components.Plain(text=message).json())]
@@ -429,7 +433,7 @@ class MiraiProtocol:
                 raiser(ValueError("invaild target as a member obj."))
 
     async def handleInternalImageAsGroup(self, image: InternalImage):
-        return await self.uploadImage("group", image.path)
+        return await self.uploadImage("group", image)
 
     async def handleInternalImageAsFriend(self, image: InternalImage):
-        return await self.uploadImage("friend", image.path)
+        return await self.uploadImage("friend", image)
